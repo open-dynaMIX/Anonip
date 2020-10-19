@@ -41,6 +41,7 @@ from __future__ import print_function, unicode_literals
 
 import argparse
 import logging
+import re
 import sys
 from io import open
 
@@ -79,6 +80,7 @@ class Anonip(object):
         increment=0,
         delimiter=" ",
         replace=None,
+        regex=None,
         skip_private=False,
     ):
         """
@@ -99,7 +101,12 @@ class Anonip(object):
         self.increment = increment
         self.delimiter = delimiter
         self.replace = replace
+        self.regex = regex
         self.skip_private = skip_private
+
+        self.process_method = self.process_line_column
+        if self.regex:
+            self.process_method = self.process_line_regex
 
     @property
     def columns(self):
@@ -154,7 +161,8 @@ class Anonip(object):
 
             logger.debug("Got line: %r", line)
 
-            yield self.process_line(line)
+            yield self.process_method(line)
+
             line = input_file.readline()
 
     def process_ip(self, ip):
@@ -177,9 +185,36 @@ class Anonip(object):
                     )
             return trunc_ip
 
-    def process_line(self, line):
+    def process_line_regex(self, line):
         """
-        This function processes a single line.
+        This function processes a single line based on the provided regex.
+
+        It returns the anonymized log line as string.
+
+        :param line: str
+        :return: str
+        """
+        match = re.match(self.regex, line)
+        if not match:
+            logger.debug("Regex did not match!")
+            return line
+        groups = match.groups()
+
+        for m in set(groups):
+            if not m:
+                continue
+            ip_str, ip = self.extract_ip(m)
+            if ip:
+                trunc_ip = self.process_ip(ip)
+                line = line.replace(ip_str, str(trunc_ip))
+            elif self.replace:
+                line = line.replace(m, self.replace)
+
+        return line
+
+    def process_line_column(self, line):
+        """
+        This function processes a single line based on the provided columns.
 
         It returns the anonymized log line as string.
 
@@ -298,6 +333,18 @@ def _validate_integer_ht_0(value):
     return value
 
 
+def regex_arg_type(value):
+    try:
+        re.compile(value)
+    except re.error as e:
+        msg = "must be a valid regex."
+        if hasattr(e, "msg"):  # pragma: no cover
+            # not available on py27
+            msg = "must be a valid regex. Error: {}".format(e.msg)
+        raise argparse.ArgumentTypeError(msg)
+    return value
+
+
 def parse_arguments(args):
     """
     Parse all given arguments.
@@ -351,7 +398,6 @@ def parse_arguments(args):
         type=lambda x: _validate_integer_ht_0(x),
         help="assume IP address is in column n (1-based indexed; default: 1)",
     )
-    parser.set_defaults(column=[1])
     parser.add_argument(
         "-l",
         "--delimiter",
@@ -359,7 +405,13 @@ def parse_arguments(args):
         type=str,
         help='log delimiter (default: " ")',
     )
-    parser.set_defaults(delimiter=" ")
+    parser.add_argument(
+        "--regex",
+        metavar="STRING",
+        nargs="+",
+        help="regex for detecting IP addresses (use optionally instead of -c)",
+        type=regex_arg_type,
+    )
     parser.add_argument(
         "-r",
         "--replace",
@@ -380,6 +432,20 @@ def parse_arguments(args):
     parser.add_argument("-v", "--version", action="version", version=__version__)
 
     args = parser.parse_args(args)
+
+    if args.regex and (args.columns is not None or args.delimiter is not None):
+        raise parser.error(
+            'Ambiguous arguments: When using "--regex", "-c" and "-l" can\'t be used.'
+        )
+    if not args.regex and args.columns is None:
+        args.columns = [1]
+    if not args.regex and args.delimiter is None:
+        args.delimiter = " "
+    if args.regex:
+        try:
+            args.regex = re.compile(r"|".join(args.regex))
+        except re.error:  # pragma: no cover
+            raise argparse.ArgumentTypeError("Failed to compile concatenated regex!")
 
     return args
 
@@ -402,6 +468,7 @@ def main():
         args.increment,
         args.delimiter,
         args.replace,
+        args.regex,
         args.skip_private,
     )
 

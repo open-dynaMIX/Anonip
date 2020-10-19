@@ -10,6 +10,7 @@ from __future__ import print_function, unicode_literals
 
 import argparse
 import logging
+import re
 import sys
 from io import StringIO
 
@@ -81,7 +82,7 @@ logging.disable(logging.CRITICAL)
 )
 def test_process_line(ip, v4mask, v6mask, expected):
     a = anonip.Anonip(ipv4mask=v4mask, ipv6mask=v6mask)
-    assert a.process_line(ip) == expected
+    assert a.process_line_column(ip) == expected
 
 
 @pytest.mark.parametrize(
@@ -93,7 +94,7 @@ def test_process_line(ip, v4mask, v6mask, expected):
 )
 def test_increment(ip, increment, expected):
     a = anonip.Anonip(increment=increment)
-    assert a.process_line(ip) == expected
+    assert a.process_line_column(ip) == expected
 
 
 @pytest.mark.parametrize(
@@ -128,25 +129,71 @@ def test_increment(ip, increment, expected):
 )
 def test_column(line, columns, expected):
     a = anonip.Anonip(columns=columns)
-    assert a.process_line(line) == expected
+    assert a.process_line_column(line) == expected
+
+
+@pytest.mark.parametrize(
+    "line,regex,expected,replace",
+    [
+        (
+            '3.3.3.3 - - [20/May/2015:21:05:01 +0000] "GET / HTTP/1.1" 200 13358 "-" "useragent"',
+            re.compile(r"(?:^(.*) - - |.* - somefixedstring: (.*) - .* - (.*))"),
+            '3.3.0.0 - - [20/May/2015:21:05:01 +0000] "GET / HTTP/1.1" 200 13358 "-" "useragent"',
+            None,
+        ),
+        (
+            "blabla/ 3.3.3.3 /blublu",
+            re.compile(r"^blabla/ (.*) /blublu"),
+            "blabla/ 3.3.0.0 /blublu",
+            None,
+        ),
+        (
+            "1.1.1.1 - somefixedstring: 2.2.2.2 - some random stuff - 3.3.3.3",
+            re.compile(r"^(.*) - somefixedstring: (.*) - .* - (.*)"),
+            "1.1.0.0 - somefixedstring: 2.2.0.0 - some random stuff - 3.3.0.0",
+            None,
+        ),
+        (
+            "some line that doesn't match the provided regex",
+            re.compile(r"^(.*) - somefixedstring: (.*) - .* - (.*)"),
+            "some line that doesn't match the provided regex",
+            None,
+        ),
+        (
+            "match but no ip/ notanip /blublu",
+            re.compile(r"^match but no ip/ (.*) /blublu"),
+            "match but no ip/ notanip /blublu",
+            None,
+        ),
+        (
+            "match but no ip/ notanip /blublu",
+            re.compile(r"^match but no ip/ (.*) /blublu"),
+            "match but no ip/ yeah /blublu",
+            "yeah",
+        ),
+    ],
+)
+def test_regex(line, regex, expected, replace):
+    a = anonip.Anonip(regex=regex, replace=replace)
+    assert a.process_line_regex(line) == expected
 
 
 def test_replace():
     a = anonip.Anonip(replace="replacement")
-    assert a.process_line("bla something") == "replacement something"
+    assert a.process_line_column("bla something") == "replacement something"
 
 
 def test_delimiter():
     a = anonip.Anonip(delimiter=";")
     assert (
-        a.process_line("192.168.100.200;some;string;with;öéäü")
+        a.process_line_column("192.168.100.200;some;string;with;öéäü")
         == "192.168.96.0;some;string;with;öéäü"
     )
 
 
 def test_private():
     a = anonip.Anonip(skip_private=True)
-    assert a.process_line("192.168.100.200") == "192.168.100.200"
+    assert a.process_line_column("192.168.100.200") == "192.168.100.200"
 
 
 def test_run(monkeypatch):
@@ -182,6 +229,39 @@ def test_cli_generic_args(args, attribute, expected):
 
 
 @pytest.mark.parametrize(
+    "args,success",
+    [
+        ([], True),
+        (["--regex", "test"], True),
+        (["-c", "4"], True),
+        (["--regex", "test", "-c", "3"], False),
+        (["--regex", "test", "-l", ";"], False),
+        (["--regex", "test", "-l", ";", "-c", "4"], False),
+    ],
+)
+def test_cli_args_ambiguity(args, success):
+    if success:
+        anonip.parse_arguments(args)
+        return
+
+    with pytest.raises(SystemExit) as e:
+        anonip.parse_arguments(args)
+    assert e.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "args,expected",
+    [
+        (["--regex", "test"], "test"),
+        (["--regex", "foo", "bar", "baz"], "foo|bar|baz"),
+    ],
+)
+def test_regex_concat(args, expected):
+    args = anonip.parse_arguments(args)
+    assert args.regex == re.compile(expected)
+
+
+@pytest.mark.parametrize(
     "value,valid,bits",
     [
         ("1", True, 32),
@@ -208,6 +288,15 @@ def test_cli_validate_integer_ht_0(value, valid):
     else:
         with pytest.raises(argparse.ArgumentTypeError):
             anonip._validate_integer_ht_0(value)
+
+
+@pytest.mark.parametrize("value,valid", [("valid (.*)", True), ("\\9", False)])
+def test_regex_arg_type(value, valid):
+    if valid:
+        assert anonip.regex_arg_type(value) == value
+    else:
+        with pytest.raises(argparse.ArgumentTypeError):
+            anonip.regex_arg_type(value)
 
 
 @pytest.mark.parametrize("to_file", [False, True])
